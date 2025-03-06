@@ -1,9 +1,48 @@
+// Pin assignments and functionalities:
+
+// Buzzer is connected to pins 9 and 10 (default configuration for the toneAC library).
+// Rotary encoder is connected to pins 3 (CLK) and 4 (DT).
+// Encoder button is connected to pin 2.
+// LDR (Light Dependent Resistor) is connected to A2 (optional).
+// TM1637 display module is connected to pins 5 (DIO) and 6 (CLK).
+// RTC DS1307 module is connected to SDA (A4) and SCL (A5).
+
+// RTC DS1307 (Real-Time Clock) is optional:
+// - If connected, it maintains the time even when the device is powered off.
+// - If not connected, the clock is set to the compilation time.
+
+// Clock and timer functionalities:
+// - The clock can be set by holding the button for 3 seconds.
+// - The timer can be set in the same way (holding the button for 3 seconds).
+// - The timer can be started, stopped, and reset using the button:
+//   - Press to start/stop.
+//   - Hold for 3 seconds to reset.
+// - When the timer reaches 0, an alarm sounds.
+// - The alarm can be stopped by pressing the button and reset by holding it for 3 seconds.
+
+// Display brightness control:
+// - Automatically adjusted using the LDR sensor:
+//   - Brightness is set to maximum when LDR reads > 500.
+//   - Brightness is set to minimum when LDR reads ≤ 500 or is not connected.
+// - When the alarm is active, brightness is always set to maximum.
+
+// Debugging:
+// - The built-in LED (pin 13) is used to indicate the presence of the RTC module.
+// - Serial communication is used for debugging purposes baud rate: 115200.
+
 #include <TM1637Display.h> // author Avishay Orpaz
 #include <Encoder.h> // author Paul Stoffregen
 #include <Bounce2.h> // maintainer Thomas O Fredericks
 #include <toneAC.h> // author Tim Eckel
 #include <Wire.h>
-#include <DS3231.h> // maintainer Andrew Wickert
+#include <RTClib.h> // maintainer Adafruit
+
+// #define DEBUG // uncomment to enable general DEBUG mode
+// #define DEBUG_RTC // uncomment to enable RTC debug
+// #define DEBUG_LDR // uncomment to enable LDR_PIN debug
+// #define DEBUG_ENCODER // uncomment to enable encoder debug
+
+RTC_DS1307 rtc;
 
 const byte BUTTON_PIN = 2;
 const byte ENCODER_PIN_A = 3; // external interrupt pin
@@ -15,13 +54,13 @@ const byte LDR_PIN = A2;
 const byte ENCODER_PULSES_PER_STEP = 4;
 const unsigned DISPLAY_REFRESH_INTERVAL = 100; // milliseconds
 const unsigned LONG_PUSH_INTERVAL = 3000; // miliseconds
-const unsigned SET_TIME_BLINK_MILLIS = 250;
+const unsigned SET_TIME_BLINK_MILLIS = 150;
 const unsigned ALARM_BLINK_MILLIS = 700;
-const unsigned BELL_REPEAT_INTERVAL = 60000; // miliseconds
+const unsigned BELL_REPEAT_INTERVAL = 10000; // miliseconds
 const unsigned TIMER_DISPLAY_TIMEOUT = 60000; // miliseconds
 const unsigned MINUTE_MILIS = 60000 - 6;
-const unsigned CLOCK_MILIS_CORRECTION_PER_HOUR = 41;
-const unsigned LDR_MAX_LIGHT = 150; // max for max display brightness
+const unsigned CLOCK_MILIS_CORRECTION_PER_HOUR = 75;
+const unsigned LDR_MAX_LIGHT = 500; // max for max display brightness
 
 enum {
   CLOCK,
@@ -44,6 +83,9 @@ unsigned timerSeconds = 0;
 byte displayData[4];
 
 void setup() {
+  #ifdef DEBUG
+    Serial.begin(115200);
+  #endif
   button.attach(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);
   Wire.begin();
@@ -112,6 +154,10 @@ void loop() {
   // encoder
   int dir = encoder.read();
   if (abs(dir) >= ENCODER_PULSES_PER_STEP) {
+    #ifdef DEBUG_ENCODER
+      Serial.print("Encoder direction: ");
+      Serial.println(dir);
+    #endif
     if (state == SET_HOUR) {
       if (dir > 0) {
         clockHour = (clockHour < 23) ? (clockHour + 1) : 0;
@@ -170,6 +216,9 @@ void loop() {
   button.update();
   if (button.fell()) {
     buttonPushedMillis = currentMillis;
+    #ifdef DEBUG
+      Serial.println("Button pressed");
+    #endif
   }
   if (buttonPushedMillis && currentMillis - buttonPushedMillis > LONG_PUSH_INTERVAL) {
     buttonPushedMillis = 0;
@@ -188,6 +237,9 @@ void loop() {
   if (button.rose() && buttonPushedMillis != 0) {
     buttonPushedMillis = 0;
     displayTimeoutMillis = 0;
+    #ifdef DEBUG
+      Serial.println("Button released");
+    #endif
     switch (state) {
       case SET_HOUR:
         state = SET_MINUTE;
@@ -260,13 +312,17 @@ void loop() {
       lastLDRReading = 1300;
     } else {
       unsigned a = analogRead(LDR_PIN);
+      #ifdef DEBUG_LDR
+        Serial.print("LDR Reading: ");
+        Serial.println(a);
+      #endif
       if (abs(a - lastLDRReading) > 10) {
         lastLDRReading = a;
         byte brightness;
         if (a > LDR_MAX_LIGHT) {
           brightness = 7;
         } else {
-          brightness = map(a, 0, LDR_MAX_LIGHT, 2, 7);
+          brightness = map(a, 0, LDR_MAX_LIGHT, 1, 1);
         }
         display.setBrightness(brightness, true);
       }
@@ -277,8 +333,40 @@ void loop() {
 }
 
 void loadRTCTime() {
-  DateTime now = RTClib::now();
-  if (now.hour() > 23) {
+  if (! rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    Serial.flush();
+    while (1) delay(10);
+  }
+  if (!rtcPresent) return;
+  if (! rtc.isrunning()) {
+    Serial.println("RTC is NOT running, let's set the time!");
+    // When time needs to be set on a new device, or after a power loss, the
+    // following line sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // This line sets the RTC with an explicit date & time, for example to set
+    // January 21, 2014 at 3am you would call:
+    // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
+  }
+  DateTime now = rtc.now();
+  #ifdef DEBUG_RTC
+    Serial.println();
+    Serial.print(now.year(), DEC);
+    Serial.print('/');
+    Serial.print(now.month(), DEC);
+    Serial.print('/');
+    Serial.print(now.day(), DEC);
+    Serial.print(" (");
+    Serial.print(") ");
+    Serial.print(now.hour(), DEC);
+    Serial.print(':');
+    Serial.print(now.minute(), DEC);
+    Serial.print(':');
+    Serial.print(now.second(), DEC);
+    Serial.println();
+  #endif
+  
+  if (!now.isValid()) {
     rtcPresent = false;
     return;
   }
@@ -288,12 +376,8 @@ void loadRTCTime() {
 }
 
 void saveTimeToRTC() {
-  if (!rtcPresent)
-    return;
-  DS3231 rtc;
-  rtc.setSecond(0);
-  rtc.setMinute(clockMinute);
-  rtc.setHour(clockHour);
+  if (!rtcPresent) return;
+  rtc.adjust(DateTime(2000, 1, 1, clockHour, clockMinute, 0));
 }
 
 void showClock(bool showColon, bool showHour, bool showMinute) {
